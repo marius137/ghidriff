@@ -23,11 +23,7 @@ jobs:
       matrix:
         # cover the latest and all versions of all subreleases        
         image: [
-          "latest",
-          "11.3ghidra3.12python-bookworm",
-          "11.3ghidra3.11python-bookworm",
-          "11.3ghidra3.10python-bookworm",
-          # "11.3ghidra3.9python-bookworm",
+          "12.0.4ghidra3.13python-bookworm",
           ]
     container:
         image: ghcr.io/clearbluejar/ghidra-python:${{ matrix.image }}
@@ -51,7 +47,7 @@ jobs:
         pip install --upgrade pip
         cd ghidriff
         # install ghidriff package and testing reqs
-        pip install ".[testing]"
+        pip install ".[testing,dev]"
         ls -R /root
         #pyghidra &
         #sleep 10
@@ -64,6 +60,5 @@ jobs:
         # download data to shared test data
         if [ ! -d "tests/data" ]; then git clone https://github.com/clearbluejar/ghidriff-test-data.git tests/data; fi
 
-        pytest -rAv
+        make test
       shell: bash
-      
