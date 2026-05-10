@@ -5,9 +5,6 @@ source .env/bin/activate
 # upgrade pip
 pip install --upgrade pip
 
-# Download latest pyi typings for Ghidra Version
-pip install ghidra-stubs
-
 # If arm64 os, need to build native binaries for Ghidra
 if uname -a | grep -q 'aarch64'; then
     if [ -e $GHIDRA_INSTALL_DIR/support/buildNatives ]
@@ -21,9 +18,21 @@ if uname -a | grep -q 'aarch64'; then
 fi
 fi
 
-# install local workspace and test requirements
-pip install -e ".[testing]"
+# install local workspace, test requirements, and dev tooling
+pip install -e ".[testing,dev]"
 
+# Link ghidra-stubs to a stable path for VS Code/Pylance autocomplete.
+STUB_PATH="$(python - <<'PY'
+from pathlib import Path
+import sysconfig
+
+stub_path = Path(sysconfig.get_paths()["purelib"]) / "ghidra-stubs"
+print(stub_path if stub_path.exists() else "")
+PY
+)"
+if [ -n "$STUB_PATH" ]; then
+    ln -sfn "$STUB_PATH" .env/ghidra-stubs
+fi
 
 # git clone test data if dir doesn't exist
 TEST_DATA_PATH="tests/data"

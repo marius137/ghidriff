@@ -133,6 +133,7 @@ dmypy.json
 .ghidra_bridge*/
 .symbols*/
 ghidriffs/
+binaries/
 
 # pytest data (pulled from https://github.com/clearbluejar/ghidriff-test-data)
 tests/data
