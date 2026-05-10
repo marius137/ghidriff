@@ -99,6 +99,11 @@ class VersionTrackingDiff(GhidraDiffEngine):
                 # sanity check symbolmatch
                 func = p1.functionManager.getFunctionAt(match.aSymbolAddress)
                 func2 = p2.functionManager.getFunctionAt(match.bSymbolAddress)
+                if func is None or func2 is None:
+                    skipped += 1
+                    self.logger.warning(
+                        f'Skipping invalid symbol match with missing function: {match.aSymbolAddress} -> {match.bSymbolAddress}')
+                    continue
                 if func.getName(True) != func2.getName(True):
                     skipped += 1
                     continue
@@ -247,14 +252,18 @@ class VersionTrackingDiff(GhidraDiffEngine):
         for match_addrs, match_types in matches.items():
 
             func = p1.functionManager.getFunctionContaining(match_addrs[0])
-            assert func.entryPoint == match_addrs[0]
             func2 = p2.functionManager.getFunctionContaining(match_addrs[1])
-            assert func2.entryPoint == match_addrs[1]
+            if func is None or func2 is None:
+                self.logger.warning(f'Skipping invalid match with missing function: {match_addrs} {match_types}')
+                continue
+            if func.entryPoint != match_addrs[0] or func2.entryPoint != match_addrs[1]:
+                self.logger.warning(f'Skipping non-entry function match: {match_addrs} {match_types}')
+                continue
 
             matched.append([func.getSymbol(), func2.getSymbol(), list(match_types.keys())])
 
         # skip types will undergo less processing
-        skip_types = ['BulkBasicBlockMnemonicHash' 'Decomp Match']
+        skip_types = ['BulkBasicBlockMnemonicHash', 'Decomp Match']
 
         return [unmatched, matched, skip_types]
 
