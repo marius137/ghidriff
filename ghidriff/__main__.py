@@ -74,7 +74,8 @@ def main():
                                      bsim_full=args.bsim_full,
                                      gdts=args.gdt,
                                      base_address=args.base_address,
-                                     program_options=args.program_options
+                                     program_options=args.program_options,
+                                     decompiler_timeout=args.decompiler_timeout
                                      )
 
     d.setup_project(binary_paths, project_path, project_name, symbols_path, gzfs_path)

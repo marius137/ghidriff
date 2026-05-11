@@ -138,13 +138,13 @@ Each implementation leverages the base class, and implements `find_changes`.
 ## Usage
 
 ```bash
-usage: ghidriff [-h] [--engine {SimpleDiff,StructualGraphDiff,VersionTrackingDiff}] [-o OUTPUT_PATH] [--summary SUMMARY] [-p PROJECT_LOCATION]
+usage: ghidriff [-h] [--engine {SimpleDiff,StructualGraphDiff,VersionTrackingDiff}] [-o OUTPUT_PATH] [--summary] [-p PROJECT_LOCATION]
                 [-n PROJECT_NAME] [-s SYMBOLS_PATH] [-g GZFS_PATH] [--ba BASE_ADDRESS] [--program-options PROGRAM_OPTIONS] [--threaded | --no-threaded]
                 [--force-analysis] [--force-diff] [--no-symbols] [--log-level {CRITICAL,FATAL,ERROR,WARN,WARNING,INFO,DEBUG,NOTSET}]
                 [--file-log-level {CRITICAL,FATAL,ERROR,WARN,WARNING,INFO,DEBUG,NOTSET}] [--log-path LOG_PATH] [--va] [--min-func-len MIN_FUNC_LEN]
                 [--use-calling-counts | --no-use-calling-counts] [--gdt GDT] [--bsim | --no-bsim] [--bsim-full | --no-bsim-full]
-                [--max-ram-percent MAX_RAM_PERCENT] [--print-flags] [--jvm-args [JVM_ARGS]] [--sxs] [--max-section-funcs MAX_SECTION_FUNCS]
-                [--md-title MD_TITLE]
+                [--max-ram-percent MAX_RAM_PERCENT] [--print-flags] [--jvm-args JVM_ARGS] [--decompiler-timeout DECOMPILER_TIMEOUT] [--sxs]
+                [--max-section-funcs MAX_SECTION_FUNCS] [--md-title MD_TITLE]
                 old new [new ...]
 
 ghidriff - A Command Line Ghidra Binary Diffing Engine
@@ -159,7 +159,7 @@ options:
                         The diff implementation to use. (default: VersionTrackingDiff)
   -o OUTPUT_PATH, --output-path OUTPUT_PATH
                         Output path for resulting diffs (default: ghidriffs)
-  --summary SUMMARY     Add a summary diff if more than two bins are provided (default: False)
+  --summary             Add a summary diff if more than two bins are provided (default: False)
 ```
 
 
@@ -214,7 +214,9 @@ JVM Options:
                         Set JVM Max Ram % of host RAM (default: 60.0)
   --print-flags         Print JVM flags at start (default: False)
   --jvm-args [JVM_ARGS]
-                        JVM args to add at start (default: None)
+                        JVM arg to add at start. Repeat as needed; use --jvm-args=-Xmx8G for values beginning with "-". (default: [])
+  --decompiler-timeout DECOMPILER_TIMEOUT
+                        Decompiler timeout in seconds per function (default: 60)
 
 Markdown Options:
   --sxs                 Include side by side code diff (default: False)
@@ -279,7 +281,7 @@ $ ghidriff --base-address 0x80000 STM32F103C-firmware.bin STM32F103Ca-firmware.b
 
 ## Quick Start Environment Setup
 
-1. [Download](https://github.com/NationalSecurityAgency/ghidra/releases) and [install Ghidra](https://htmlpreview.github.io/?https://github.com/NationalSecurityAgency/ghidra/blob/stable/GhidraDocs/InstallationGuide.html#Install).
+1. [Download](https://github.com/NationalSecurityAgency/ghidra/releases) and [install Ghidra](https://htmlpreview.github.io/?https://github.com/NationalSecurityAgency/ghidra/blob/stable/GhidraDocs/InstallationGuide.html#Install). The current development target is Ghidra 12.0.4 with pyghidra 3.x.
 2. Set Ghidra Environment Variable `GHIDRA_INSTALL_DIR` to Ghidra install location.
 3. Pip install `ghidriff`
 
@@ -293,6 +295,14 @@ PS C:\Users\user> pip install ghidriff
 
 ```bash
 export GHIDRA_INSTALL_DIR="/path/to/ghidra/"
+pip install ghidriff
+```
+
+On macOS, install a JDK supported by your Ghidra release first, then set `GHIDRA_INSTALL_DIR` to the unpacked Ghidra application directory. If macOS Gatekeeper quarantines the downloaded Ghidra archive, remove the quarantine attribute before first launch:
+
+```bash
+xattr -dr com.apple.quarantine /path/to/ghidra_12.0.4_PUBLIC
+export GHIDRA_INSTALL_DIR="/path/to/ghidra_12.0.4_PUBLIC"
 pip install ghidriff
 ```
 
@@ -359,6 +369,27 @@ ghidriffs
 ### Devcontainer - For Ghidriff development
 
 Use the [.devcontainer](.devcontainer) in this repo. If you don't know how, follow the detailed instructions here: [ghidra-python-vscode-devcontainer-skeleton quick setup](https://github.com/clearbluejar/ghidra-python-vscode-devcontainer-skeleton#quick-start-setup---dev-container--best-option).
+
+The devcontainer targets `ghcr.io/clearbluejar/ghidra-python:12.0.4ghidra3.13python-bookworm`. After rebuilding it, the post-create step installs ghidriff with test and dev extras.
+
+Useful development commands:
+
+```bash
+make install-dev
+make test
+make test-fast
+make test-integration
+make lint
+make check
+```
+
+`make test` runs the full suite. `make test-fast` runs tests that do not launch Ghidra. `make test-integration` runs the Ghidra-backed tests and requires `tests/data`, `GHIDRA_INSTALL_DIR`, and a compatible pyghidra/Ghidra runtime. JVM arguments that begin with `-` should be passed with equals syntax, for example:
+
+```bash
+ghidriff --jvm-args=-Xmx8G --decompiler-timeout 120 old.bin new.bin
+```
+
+Deferred design items are tracked in [docs/deferred-issues.md](docs/deferred-issues.md).
 
 
 ## Use Cases
@@ -806,4 +837,4 @@ Want to see the entire diff in a side by side? https://diffpreview.github.io/?f6
 
 ### Markdown Spec + MermaidJs
 - Striving to be compliant with [GFM](https://github.github.com/gfm/) and [cmark](https://spec.commonmark.org/). Still working on it though. See issues.
-- MermaidJs requires your markdown [renderer support](https://mermaid.js.org/ecosystem/integrations-community.html). 
+- MermaidJs requires your markdown [renderer support](https://mermaid.js.org/ecosystem/integrations-community.html).

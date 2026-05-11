@@ -7,7 +7,11 @@ import re
 from time import time
 from datetime import datetime
 from collections import Counter
+from importlib.metadata import PackageNotFoundError, version
 import concurrent.futures
+from queue import Queue
+from threading import Lock
+from types import SimpleNamespace
 from typing import List, Tuple, Union, TYPE_CHECKING
 from argparse import Namespace
 import logging
@@ -61,7 +65,7 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
             max_workers=multiprocessing.cpu_count(),
             max_ram_percent: float = 60.0,
             print_jvm_flags: bool = False,
-            jvm_args: List[str] = [],
+            jvm_args: List[str] = None,
             force_analysis: bool = False,
             force_diff: bool = False,
             verbose_analysis: bool = False,
@@ -74,9 +78,10 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
             use_calling_counts: bool = False,
             bsim: bool = True,
             bsim_full: bool = False,
-            gdts: list = [],
+            gdts: list = None,
             base_address: int = None,
-            program_options: dict = None) -> None:
+            program_options: dict = None,
+            decompiler_timeout: int = 60) -> None:
 
         # setup engine logging
         self.logger = self.setup_logger(engine_log_level)
@@ -111,9 +116,12 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
         if print_jvm_flags:
             launcher.add_vmargs('-XX:+PrintFlagsFinal')
 
+        if jvm_args is None:
+            jvm_args = []
+
         if jvm_args:
             for jvm_arg in jvm_args:
-                self.logger.info('Adding JVM arg {jvm_arg}')
+                self.logger.info(f'Adding JVM arg {jvm_arg}')
                 launcher.add_vmargs(jvm_arg)
 
         self.logger.info(f'Starting Ghidra...')
@@ -123,9 +131,10 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
         self.launcher = launcher
 
         self.logger.info(f'GHIDRA_INSTALL_DIR: {self.launcher._install_dir}')
-        app_prop = launcher._layout.getApplicationProperties()
+        app_prop = self.get_ghidra_application_info(launcher)
         self.logger.info(
             f'GHIDRA {app_prop.applicationVersion}  Build Date: {app_prop.applicationBuildDate} Release: {app_prop.applicationReleaseName}')
+        self.check_runtime_compatibility(app_prop.applicationVersion)
         self.logger.info(f"Engine Args:")
         for arg in vars(args):
             self.logger.info('\t%-20s%s', f'{arg}:', vars(args)[arg])
@@ -162,8 +171,10 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
 
         self.bsim = bsim
         self.bsim_full = bsim_full
+        self.decompiler_timeout = decompiler_timeout
+        self.analysis_lock = Lock()
 
-        self.gdts = gdts
+        self.gdts = gdts or []
         self.base_address = base_address
         if program_options is not None:
             self.program_options = json.loads(Path(program_options).read_text())
@@ -171,6 +182,48 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
             self.program_options = None
 
         self.logger.debug(f'{vars(self)}')
+
+    @staticmethod
+    def get_ghidra_application_info(launcher) -> SimpleNamespace:
+        """
+        Return Ghidra application metadata from the active layout or launcher config.
+
+        PyGhidraLauncher.start() returns early when JPype already has a JVM, so a
+        new launcher can have no layout even though launcher.app_info is valid.
+        """
+
+        if getattr(launcher, "_layout", None) is not None:
+            return launcher._layout.getApplicationProperties()
+
+        app_info = launcher.app_info
+        return SimpleNamespace(
+            applicationVersion=app_info.version,
+            applicationBuildDate=app_info.build_date,
+            applicationReleaseName=app_info.release_name,
+        )
+
+    def check_runtime_compatibility(self, ghidra_version: str) -> None:
+        """
+        Warn when the active Ghidra/pyghidra runtime differs from the supported target.
+        """
+
+        target_ghidra = "12.0.4"
+        if str(ghidra_version) != target_ghidra:
+            self.logger.warning(
+                f"Expected Ghidra {target_ghidra}; running {ghidra_version}. "
+                "Rebuild the devcontainer or use --force-diff only after validating runtime behavior."
+            )
+
+        try:
+            pyghidra_version = version("pyghidra")
+        except PackageNotFoundError:
+            self.logger.warning("Could not determine installed pyghidra version.")
+            return
+
+        if not pyghidra_version.startswith("3."):
+            self.logger.warning(
+                f"Expected pyghidra 3.x for Ghidra {target_ghidra}; running pyghidra {pyghidra_version}."
+            )
 
     @staticmethod
     def add_ghidra_args_to_parser(parser: argparse.ArgumentParser) -> None:
@@ -255,9 +308,12 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
         # group.add_argument('--exact-matches', help='Only consider exact matches', action='store_true')
 
         group = parser.add_argument_group('JVM Options')
-        group.add_argument('--max-ram-percent', help='Set JVM Max Ram %% of host RAM', default=60.0)
+        group.add_argument('--max-ram-percent', help='Set JVM Max Ram %% of host RAM', type=float, default=60.0)
         group.add_argument('--print-flags', help='Print JVM flags at start', action='store_true')
-        group.add_argument('--jvm-args', nargs='?', help='JVM args to add at start', default=None)
+        group.add_argument('--jvm-args', action='append', default=[],
+                           help='JVM arg to add at start. Repeat as needed; use --jvm-args=-Xmx8G for values beginning with "-".')
+        group.add_argument('--decompiler-timeout', type=int, default=60,
+                           help='Decompiler timeout in seconds per function')
 
         group = parser.add_argument_group('Markdown Options')
         group.add_argument('--sxs', dest='side_by_side', action='store_true',
@@ -633,6 +689,8 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
 
         if self.threaded:
             decompiler_count = 2 * self.max_workers
+            self.decompilers.setdefault(p1.name, {}).setdefault('available', Queue())
+            self.decompilers.setdefault(p2.name, {}).setdefault('available', Queue())
             for i in range(self.max_workers):
                 self.decompilers.setdefault(p1.name, {}).setdefault(i, DecompInterface())
                 self.decompilers.setdefault(p2.name, {}).setdefault(i, DecompInterface())
@@ -640,18 +698,20 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
                 self.decompilers[p2.name][i].setOptions(p2_options)
                 self.decompilers[p1.name][i].openProgram(p1)
                 self.decompilers[p2.name][i].openProgram(p2)
-                self.decompilers[p1.name].setdefault('available', []).append(i)
-                self.decompilers[p2.name].setdefault('available', []).append(i)
+                self.decompilers[p1.name]['available'].put(i)
+                self.decompilers[p2.name]['available'].put(i)
         else:
             decompiler_count = 2
+            self.decompilers.setdefault(p1.name, {}).setdefault('available', Queue())
+            self.decompilers.setdefault(p2.name, {}).setdefault('available', Queue())
             self.decompilers.setdefault(p1.name, {}).setdefault(0, DecompInterface())
             self.decompilers.setdefault(p2.name, {}).setdefault(0, DecompInterface())
             self.decompilers[p1.name][0].setOptions(p1_options)
             self.decompilers[p2.name][0].setOptions(p2_options)
             self.decompilers[p1.name][0].openProgram(p1)
             self.decompilers[p2.name][0].openProgram(p2)
-            self.decompilers[p1.name].setdefault('available', []).append(0)
-            self.decompilers[p2.name].setdefault('available', []).append(0)
+            self.decompilers[p1.name]['available'].put(0)
+            self.decompilers[p2.name]['available'].put(0)
 
         self.logger.info(f'Setup {decompiler_count} decompliers')
 
@@ -687,27 +747,19 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
 
         code = ''
         error = ''
-        decomp_id = None
         monitor = ConsoleTaskMonitor()
+        decomp_id = self.decompilers[prog.name]['available'].get()
+        try:
+            results: 'ghidra.app.decompiler.DecompileResults' = self.decompilers[prog.name][decomp_id].decompileFunction(
+                func, timeout, monitor)
 
-        # list operations are atomic. right?
-        while decomp_id == None:
-            try:
-                decomp_id = self.decompilers[prog.name]['available'].pop()
-            except IndexError:
-                pass
-
-        results: 'ghidra.app.decompiler.DecompileResults' = self.decompilers[prog.name][decomp_id].decompileFunction(
-            func, timeout, monitor)
-
-        error = results.getErrorMessage()
-        if error == '':
-            code = results.getDecompiledFunction().getC()
-        else:
-            error = f'Error: Decompile error: {error}'
-
-        # set decomp as available
-        self.decompilers[prog.name]['available'].append(decomp_id)
+            error = results.getErrorMessage()
+            if error == '':
+                code = results.getDecompiledFunction().getC()
+            else:
+                error = f'Error: Decompile error: {error}'
+        finally:
+            self.decompilers[prog.name]['available'].put(decomp_id)
 
         return error, code
 
@@ -925,20 +977,14 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
 
                 self.logger.info(f'Starting Ghidra analysis of {program}...')
                 try:
-                    # temp fix for #125
-                    # introduces random delay time before analysis start
-                    import time
-                    import random
-                    sleep_duration = random.uniform(3, 7)
-                    time.sleep(sleep_duration)
-                    #####
-                    flat_api.analyzeAll(program)
-                    if hasattr(GhidraProgramUtilities, 'setAnalyzedFlag'):
-                        GhidraProgramUtilities.setAnalyzedFlag(program, True)
-                    elif hasattr(GhidraProgramUtilities, 'markProgramAnalyzed'):
-                        GhidraProgramUtilities.markProgramAnalyzed(program)
-                    else:
-                        raise Exception('Missing set analyzed flag method!')
+                    with self.analysis_lock:
+                        flat_api.analyzeAll(program)
+                        if hasattr(GhidraProgramUtilities, 'setAnalyzedFlag'):
+                            GhidraProgramUtilities.setAnalyzedFlag(program, True)
+                        elif hasattr(GhidraProgramUtilities, 'markProgramAnalyzed'):
+                            GhidraProgramUtilities.markProgramAnalyzed(program)
+                        else:
+                            raise Exception('Missing set analyzed flag method!')
                 finally:
                     GhidraScriptUtil.releaseBundleHostReference()
                     self.project.save(program)
@@ -1327,12 +1373,12 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
         If the the match type == any of the skip types. Return false.
         """
 
-        from ghidra.program.model.symbol import SourceType
-
         func: 'ghidra.program.model.listing.Function' = sym.program.functionManager.getFunctionAt(sym.address)
         func2: 'ghidra.program.model.listing.Function' = sym2.program.functionManager.getFunctionAt(sym2.address)
 
-        assert func is not None and func2 is not None
+        if func is None or func2 is None:
+            self.logger.warning(f'Skipping invalid function match: {sym} {sym2} {match_types}')
+            return False
 
         need_diff = False
 
@@ -1340,6 +1386,19 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
             if func.body.numAddresses != func2.body.numAddresses:
                 need_diff = True
             elif sym.referenceCount != sym2.referenceCount:
+                need_diff = True
+            elif (
+                {
+                    'StructuralGraphHash',
+                    'StructuralGraphExactHash',
+                    'BulkInstructionHash',
+                    'BulkBasicBlockMnemonicHash',
+                    'BSIM',
+                    'Decomp Match',
+                }.intersection(match_types)
+                and self.min_func_len < 10
+                and min(func.body.numAddresses, func2.body.numAddresses) <= self.min_func_len
+            ):
                 need_diff = True
 
         return need_diff
@@ -1378,11 +1437,41 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
         """
         Find the first '{' and remove everything before it
         """
-        new_code = f'{code}'
-        if code is not None and "Failed to decompile" not in code and split_char in code:
-            new_code = code.split('{', 1)[1].splitlines(True)
+        if code is None:
+            return []
 
-        return new_code
+        if isinstance(code, list):
+            code = ''.join(code)
+        else:
+            code = f'{code}'
+
+        if "Failed to decompile" not in code and split_char in code:
+            return code.split(split_char, 1)[1].splitlines(True)
+
+        return code.splitlines(True)
+
+    def check_diff_preconditions(
+        self,
+        p1: "ghidra.program.model.listing.Program",
+        p2: "ghidra.program.model.listing.Program",
+    ) -> None:
+        """
+        Fail early with actionable errors when two programs are unlikely to diff correctly.
+        """
+
+        if p1.languageID != p2.languageID:
+            raise ValueError(
+                f"Language mismatch: {p1.name}:{p1.languageID} != {p2.name}:{p2.languageID}. "
+                "Use --force-diff only if this mismatch is expected."
+            )
+
+        sym_count_diff = abs(p1.getSymbolTable().numSymbols - p2.getSymbolTable().numSymbols)
+        if sym_count_diff >= 4000:
+            raise ValueError(
+                f"Symbol counts between programs ({p1.name} and {p2.name}) differ by {sym_count_diff}. "
+                "This usually means one binary has symbols and the other does not, or analysis failed. "
+                "Check Ghidra analysis/PDB loading, or use --force-diff to bypass this preflight."
+            )
 
     def diff_bins(
             self,
@@ -1442,12 +1531,7 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
         self.logger.info(f"Loaded new program: {p2.name}")
 
         if not force_diff and not self.force_diff:
-            # ensure architectures match
-            assert p1.languageID == p2.languageID, f'p1: {p1.name}:{p1.languageID} != p2: {p2.name}:{p2.languageID}. The arch or processor does not match. Add --force-diff to ignore this assert'  # nopep8
-
-            # sanity check - ensure both programs have symbols, or both don't
-            sym_count_diff = abs(p1.getSymbolTable().numSymbols - p2.getSymbolTable().numSymbols)
-            assert sym_count_diff < 4000, f'Symbols counts between programs ({p1.name} and {p2.name}) are too high {sym_count_diff}! Likely bad analysis or only one binary has symbols! Check Ghidra analysis or pdb! Add --force-diff to ignore this assert'  # nopep8
+            self.check_diff_preconditions(p1, p2)
 
         # Find (non function) symbols
         unmatched_nf_syms, _ = self.diff_nf_symbols(p1, p2)
@@ -1549,8 +1633,7 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
 
         completed = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # futures = (executor.submit(self.enhance_sym, sym, thread_id % self.max_workers, 15, (sym in funcs_need_decomp), (use_calling_counts and sym in funcs_need_decomp))
-            futures = (executor.submit(self.enhance_sym, sym, thread_id % self.max_workers, 60, (sym in funcs_need_decomp), (self.use_calling_counts and sym in funcs_need_decomp))
+            futures = (executor.submit(self.enhance_sym, sym, thread_id % self.max_workers, self.decompiler_timeout, (sym in funcs_need_decomp), (self.use_calling_counts and sym in funcs_need_decomp))
                        for thread_id, sym in enumerate(esym_lookups))
 
             for future in concurrent.futures.as_completed(futures):
@@ -1575,7 +1658,7 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
             elost = self.enhance_sym(lost)
 
             # deleted func
-            if lost.getProgram().getName() == p1.getName():
+            if lost.getProgram().getUniqueProgramID() == p1.getUniqueProgramID():
                 deleted_funcs.append(elost)
             else:
                 added_funcs.append(elost)
@@ -1642,7 +1725,7 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
 
                 # TODO remove this hack to find false positives
                 # potential decompile jumptable issue ghidra/issues/2452
-                if not "Could not recover jumptable" in diff:
+                if "Could not recover jumptable" not in diff:
                     diff_type.append('code')
                 else:
                     self.logger.warn(
@@ -1862,7 +1945,7 @@ class GhidraDiffEngine(GhidriffMarkdown, metaclass=ABCMeta):
 
                         for func_mod_type in ['old', 'new']:
 
-                            if not func[func_mod_type].get(field) is None:
+                            if func[func_mod_type].get(field) is not None:
                                 if isinstance(func[func_mod_type][field], list) and len(func[func_mod_type][field]) > 0:
                                     func[func_mod_type][field] = hash(tuple(func[func_mod_type][field]))
 

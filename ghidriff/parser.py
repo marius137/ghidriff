@@ -30,6 +30,7 @@ def get_parser() -> argparse.ArgumentParser:
                         default='VersionTrackingDiff', choices=engines.keys())
 
     parser.add_argument('-o', '--output-path', help='Output path for resulting diffs', default='ghidriffs')
-    parser.add_argument('--summary', help='Add a summary diff if more than two bins are provided', default=False)
+    parser.add_argument('--summary', help='Add a summary diff if more than two bins are provided',
+                        action='store_true')
 
     return parser

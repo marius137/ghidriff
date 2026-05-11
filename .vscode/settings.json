@@ -1,18 +1,16 @@
 {
-    // needed to make ghidra stubs work in this project (auto complete for vscode)
     "python.defaultInterpreterPath": "${workspaceFolder}/.env/bin/python",
-    "python.analysis.stubPath": "${workspaceFolder}/.env/lib/python3.11/site-packages/ghidra-stubs/",
-    "python.autoComplete.extraPaths": [
-        "${workspaceFolder}/.env/lib/python3.11/site-packages/ghidra-stubs/"
-    ],
+    "python.terminal.activateEnvironment": true,
+    // ghidra-stubs installs outside normal import paths; post-create links this to the active venv.
     "python.analysis.extraPaths": [
-        "${workspaceFolder}/.env/lib/python3.11/site-packages/ghidra-stubs/"
+        "${workspaceFolder}/.env/ghidra-stubs"
     ],
     // env vars        
     "GHIDRA_INSTALL_DIR": "${env:GHIDRA_INSTALL_DIR}",
     "sarif-viewer.connectToGithubCodeScanning": "off",
     "liveServer.settings.port": 5501,
     "[python]": {
-        "editor.defaultFormatter": "ms-python.autopep8"
+        "editor.defaultFormatter": "charliermarsh.ruff"
     },
+    "ruff.nativeServer": "on",
 }
